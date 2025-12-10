@@ -954,7 +954,7 @@ const App: React.FC = () => {
           
           {/* Logo Section */}
           <div className="flex items-center cursor-pointer hover:opacity-80 transition-opacity" onClick={handleReset}>
-            <LogoIcon className="h-12 md:h-16 w-auto" />
+            <LogoIcon className="h-16 md:h-24 w-auto" />
           </div>
           
           <div className="flex items-center gap-6">
