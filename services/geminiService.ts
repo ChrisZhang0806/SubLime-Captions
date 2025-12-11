@@ -6,7 +6,7 @@ const BATCH_SIZE = 20; // Reduced batch size slightly for Pro model to ensure ou
 export const fixSubtitlesWithGemini = async (
   lines: string[], 
   context: ContextInfo,
-  onProgress: (processed: number) => void,
+  onProgress: (processed: number, currentLines: string[]) => void,
   signal?: AbortSignal,
   modelId: string = "gemini-3-pro-preview"
 ): Promise<string[]> => {
@@ -128,7 +128,8 @@ ${cleaningInstructions}
       correctedLines.push(...batch);
     }
 
-    onProgress(Math.min(i + BATCH_SIZE, total));
+    // Emit progress with current state of lines
+    onProgress(Math.min(i + BATCH_SIZE, total), [...correctedLines]);
   }
 
   return correctedLines;

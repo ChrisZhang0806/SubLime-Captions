@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { SubtitleCue, ContextInfo, AppStatus, ProcessingStats } from './types';
 import { parseSRT, buildSRT, hasChanged } from './utils/subtitleParser';
 import { fixSubtitlesWithGemini } from './services/geminiService';
-import { UploadIcon, CheckIcon, ArrowRightIcon, XMarkIcon, LogoIcon, GlobeIcon, SunIcon, MoonIcon, ComputerIcon, RobotIcon } from './components/Icons';
+import { UploadIcon, CheckIcon, ArrowRightIcon, ArrowLeftIcon, XMarkIcon, LogoIcon, GlobeIcon, SunIcon, MoonIcon, ComputerIcon, RobotIcon, DownloadIcon, RefreshIcon, PencilIcon } from './components/Icons';
 
 type Theme = 'light' | 'dark' | 'system';
 type Lang = 'en' | 'zh';
@@ -67,7 +67,9 @@ const translations = {
     errorLabel: "Error:",
     themeLight: "Light",
     themeDark: "Dark",
-    themeSystem: "System"
+    themeSystem: "System",
+    realtimeTitle: "Real-time Updates",
+    revertBtn: "Revert"
   },
   zh: {
     appName: "SubLime Captions",
@@ -122,13 +124,15 @@ const translations = {
     cancelBtn: "取消",
     okBtn: "确认",
     xBtn: "放弃",
-    footer: "© " + new Date().getFullYear() + " Ning Zhang. 版权所有。",
-    selectItemsPrompt: "选择项目以进行批量操作",
-    deleted: "(已删除)",
-    errorLabel: "错误：",
-    themeLight: "浅色",
-    themeDark: "深色",
-    themeSystem: "跟随系统"
+    footer: "© " + new Date().getFullYear() + " Ning Zhang. All rights reserved.",
+    selectItemsPrompt: "Select items to batch action",
+    deleted: "(Deleted)",
+    errorLabel: "Error:",
+    themeLight: "Light",
+    themeDark: "Dark",
+    themeSystem: "System",
+    realtimeTitle: "实时预览",
+    revertBtn: "撤销修改"
   }
 };
 
@@ -177,12 +181,20 @@ const App: React.FC = () => {
   
   // Processing Control
   const abortControllerRef = useRef<AbortController | null>(null);
+  const processedLinesRef = useRef<string[]>([]);
+  const realtimeOverridesRef = useRef<Record<number, string>>({});
 
   // Review & Edit State
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editText, setEditText] = useState<string>('');
   const [viewAllLines, setViewAllLines] = useState<boolean>(false);
+  
+  // Realtime Processing State
+  const [realtimeCues, setRealtimeCues] = useState<SubtitleCue[]>([]);
+  const realtimeListRef = useRef<HTMLDivElement>(null);
+  const [editingRealtimeId, setEditingRealtimeId] = useState<number | null>(null);
+  const [realtimeEditText, setRealtimeEditText] = useState<string>('');
 
   // --- Effects ---
   useEffect(() => {
@@ -211,7 +223,9 @@ const App: React.FC = () => {
       document.removeEventListener("mousedown", handleClickOutside);
     };
   }, [themeMenuRef, modelMenuRef]);
-
+  
+  // Auto-scroll removed as per request
+  
   // --- Handlers ---
 
   const handleToggleLang = () => {
@@ -402,6 +416,47 @@ const App: React.FC = () => {
     setErrorMsg(null);
   };
 
+  const updateRealtimeCues = () => {
+    if (!processedLinesRef.current) return;
+    
+    const currentLines = processedLinesRef.current;
+    const newCues = currentLines.map((text, idx) => {
+         // Check if we have an override (edit or discard/revert)
+         const override = realtimeOverridesRef.current[idx];
+         const displayText = override !== undefined ? override : text;
+         
+         if (!cues[idx]) return null;
+
+         return {
+             ...cues[idx],
+             text: displayText,
+             originalText: cues[idx].text,
+             isConfirmed: false
+         };
+    }).filter(c => c !== null) as SubtitleCue[];
+    
+    setRealtimeCues(newCues);
+  };
+
+  const handleRealtimeEditStart = (cue: SubtitleCue) => {
+    setEditingRealtimeId(cue.id);
+    setRealtimeEditText(cue.text);
+  };
+
+  const handleRealtimeEditSave = (idx: number) => {
+      // Idx here is the array index (cue index)
+      realtimeOverridesRef.current[idx] = realtimeEditText;
+      setEditingRealtimeId(null);
+      setRealtimeEditText('');
+      updateRealtimeCues();
+  };
+
+  const handleRealtimeDiscard = (idx: number) => {
+      const original = cues[idx].text; // cues state hasn't changed, text is original
+      realtimeOverridesRef.current[idx] = original;
+      updateRealtimeCues();
+  };
+
   const handleStartProcessing = async () => {
     if (cues.length === 0) return;
 
@@ -409,6 +464,12 @@ const App: React.FC = () => {
     setProgress(0);
     setErrorMsg(null);
     setSelectedIds(new Set()); 
+    setRealtimeCues([]); // Reset realtime cues
+    
+    // Reset processing state refs
+    processedLinesRef.current = [];
+    realtimeOverridesRef.current = {};
+    setEditingRealtimeId(null);
     
     // Create new abort controller
     abortControllerRef.current = new AbortController();
@@ -419,10 +480,12 @@ const App: React.FC = () => {
       const correctedTexts = await fixSubtitlesWithGemini(
         originalTexts, 
         context,
-        (processedCount) => {
+        (processedCount, currentLines) => {
            // If aborted, we might still get a progress callback, ignore it if we can't stop immediate
            if (!abortControllerRef.current?.signal.aborted) {
                setProgress(Math.round((processedCount / cues.length) * 100));
+               processedLinesRef.current = currentLines;
+               updateRealtimeCues();
            }
         },
         abortControllerRef.current.signal,
@@ -432,9 +495,14 @@ const App: React.FC = () => {
       // Check one last time before committing state
       if (abortControllerRef.current.signal.aborted) return;
 
+      // Apply overrides to the final result
+      const finalTexts = correctedTexts.map((text, idx) => {
+          return realtimeOverridesRef.current[idx] !== undefined ? realtimeOverridesRef.current[idx] : text;
+      });
+
       let changeCount = 0;
       const updatedCues = cues.map((cue, index) => {
-        const newText = correctedTexts[index] !== undefined ? correctedTexts[index] : cue.text;
+        const newText = finalTexts[index] !== undefined ? finalTexts[index] : cue.text;
         if (hasChanged(cue.text, newText)) {
           changeCount++;
         }
@@ -503,6 +571,7 @@ const App: React.FC = () => {
     setUrlPreviewTitle('');
     setSelectedIds(new Set());
     setEditingId(null);
+    setRealtimeCues([]);
   };
 
   // --- Review & Edit Handlers ---
@@ -744,208 +813,226 @@ const App: React.FC = () => {
   );
 
   const renderUploadArea = () => (
-    <div className="border-2 border-dashed border-slate-300 dark:border-slate-600 p-12 text-center hover:border-primary-500 dark:hover:border-primary-500 transition-colors cursor-pointer relative bg-slate-50/50 dark:bg-slate-800/50">
+    <div className="border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-2xl p-12 text-center bg-white/50 dark:bg-slate-900/50 hover:bg-white/80 dark:hover:bg-slate-800/80 transition-colors group cursor-pointer relative">
       <input 
         type="file" 
-        accept=".srt"
-        onChange={handleFileUpload}
+        accept=".srt" 
         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+        onChange={handleFileUpload}
       />
-      <div className="flex flex-col items-center justify-center pointer-events-none">
-        <div className="text-primary-500 mb-4">
-          <UploadIcon />
-        </div>
-        <h3 className="text-lg font-medium text-slate-900 dark:text-white mb-2">{t.dropTitle}</h3>
-        <p className="text-slate-500 dark:text-slate-400 text-sm">{t.dropDesc}</p>
+      <div className="flex flex-col items-center gap-4">
+         <div className="bg-primary-50 dark:bg-primary-900/20 p-4 rounded-full text-primary-500 dark:text-primary-400 group-hover:scale-110 transition-transform duration-300">
+           <UploadIcon />
+         </div>
+         <div>
+            <h3 className="text-xl font-bold text-slate-900 dark:text-white mb-1">{t.dropTitle}</h3>
+            <p className="text-slate-500 dark:text-slate-400">{t.dropDesc}</p>
+         </div>
       </div>
     </div>
   );
 
   const renderDiffView = () => {
-    // Determine which cues to show
-    const visibleCues = cues.filter(cue => viewAllLines || (cue.originalText && cue.text !== cue.originalText));
-    const visibleIds = visibleCues.map(c => c.id);
-    const allVisibleSelected = visibleIds.length > 0 && visibleIds.every(id => selectedIds.has(id));
+    const changedCues = cues.filter(cue => cue.text !== cue.originalText);
+    const displayedCues = viewAllLines ? cues : changedCues;
 
     return (
-      <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm flex-1 flex flex-col min-h-0 overflow-hidden">
-        {/* Header / Toolbar */}
-        <div className="p-4 border-b border-slate-200 dark:border-slate-700 flex flex-col md:flex-row justify-between items-center gap-4 bg-slate-50 dark:bg-slate-850">
-          <div className="flex items-center gap-6 w-full md:w-auto">
-              <div className="flex items-center gap-2">
-                <input 
-                  type="checkbox" 
-                  checked={allVisibleSelected}
-                  onChange={() => handleSelectAll(visibleIds)}
-                  className="w-5 h-5 border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-primary-600 focus:ring-primary-500 cursor-pointer"
-                />
-                <span className="text-sm text-slate-600 dark:text-slate-400">{t.btnSelectAll}</span>
-              </div>
+      <div className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg">
+        {/* Toolbar */}
+        <div className="p-4 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 flex items-center justify-between flex-wrap gap-4">
+            <div className="flex items-center gap-4">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input 
+                      type="checkbox" 
+                      className="rounded border-slate-300 dark:border-slate-600 text-primary-600 focus:ring-primary-500 bg-white dark:bg-slate-900"
+                      checked={viewAllLines}
+                      onChange={e => setViewAllLines(e.target.checked)}
+                    />
+                    <span className="text-sm font-medium text-slate-700 dark:text-slate-300">{t.chkShowAll}</span>
+                </label>
+                
+                {selectedIds.size > 0 && (
+                    <div className="flex items-center gap-2 animate-in fade-in slide-in-from-left-4 duration-300">
+                        <span className="text-xs text-slate-500 px-2 border-l border-slate-300 dark:border-slate-600">
+                           {selectedIds.size} selected
+                        </span>
+                        <button 
+                          onClick={handleBatchConfirm}
+                          className="text-xs bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 px-3 py-1.5 rounded-md hover:bg-green-200 dark:hover:bg-green-900/50 transition-colors font-medium"
+                        >
+                           {t.btnBatchConfirm}
+                        </button>
+                        <button 
+                          onClick={handleBatchDiscard}
+                          className="text-xs bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 px-3 py-1.5 rounded-md hover:bg-red-200 dark:hover:bg-red-900/50 transition-colors font-medium"
+                        >
+                           {t.btnBatchDiscard}
+                        </button>
+                    </div>
+                )}
+            </div>
 
-              <div className="h-6 w-px bg-slate-200 dark:bg-slate-700"></div>
-
-              {selectedIds.size > 0 ? (
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-white font-medium bg-primary-600 px-2 py-0.5">{selectedIds.size}</span>
-                  <button onClick={handleBatchConfirm} className="text-green-600 hover:text-green-700 dark:text-green-400 dark:hover:text-green-300 text-sm font-medium px-3 py-1 bg-green-100 hover:bg-green-200 dark:bg-green-900/30 dark:hover:bg-green-900/50 transition-colors">
-                    {t.btnBatchConfirm}
-                  </button>
-                  <button onClick={handleBatchDiscard} className="text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 text-sm font-medium px-3 py-1 bg-red-100 hover:bg-red-200 dark:bg-red-900/30 dark:hover:bg-red-900/50 transition-colors">
-                    {t.btnBatchDiscard}
-                  </button>
-                </div>
-              ) : (
-                <div className="text-sm text-slate-500 italic">{t.selectItemsPrompt}</div>
-              )}
-          </div>
-          
-          <div className="flex items-center gap-4 w-full md:w-auto justify-end">
-            <label className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400 cursor-pointer select-none">
-              <input 
-                type="checkbox" 
-                checked={viewAllLines} 
-                onChange={e => setViewAllLines(e.target.checked)}
-                className="border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-primary-600 focus:ring-primary-500"
-              />
-              {t.chkShowAll}
-            </label>
-            <button 
-                  onClick={handleReset}
-                  className="bg-white hover:bg-slate-100 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-600 px-4 py-2 text-sm font-medium transition-colors"
+            <div className="flex items-center gap-3">
+                <button 
+                  onClick={() => handleSelectAll(displayedCues.map(c => c.id))}
+                  className="text-sm text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 font-medium px-2 py-1"
                 >
+                  {t.btnSelectAll}
+                </button>
+                <button 
+                  onClick={handleDownload}
+                  className="flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white px-4 py-2 rounded-md font-medium shadow-sm transition-colors text-sm"
+                >
+                  <DownloadIcon />
+                  {t.btnDownload}
+                </button>
+                <button 
+                  onClick={handleReset}
+                  className="flex items-center gap-2 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-300 px-4 py-2 rounded-md font-medium hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors text-sm"
+                >
+                  <RefreshIcon />
                   {t.btnNewFile}
-            </button>
-            <button 
-                onClick={handleDownload}
-                className="bg-primary-600 hover:bg-primary-500 text-white px-6 py-2 text-sm font-medium transition-colors"
-            >
-                {t.btnDownload}
-            </button>
-          </div>
+                </button>
+            </div>
         </div>
 
         {/* List */}
-        <div className="overflow-y-auto p-4 space-y-2 flex-1 custom-scrollbar bg-slate-50 dark:bg-slate-900/50">
-          {visibleCues.map((cue) => {
-              const isChanged = cue.originalText && cue.text !== cue.originalText;
-              const isEditing = editingId === cue.id;
-              
-              return (
-                  <div 
-                    key={cue.id} 
-                    className={`
-                      grid grid-cols-[auto_80px_1fr_auto] md:grid-cols-[auto_80px_1fr_20px_1fr_auto] gap-4 p-3 border transition-colors items-center
-                      ${isEditing ? 'border-primary-500 bg-white dark:bg-slate-800 ring-1 ring-primary-500/50' : 
-                        cue.isConfirmed ? 'border-green-200 dark:border-green-900/50 bg-green-50 dark:bg-green-900/10' :
-                        isChanged ? 'border-primary-200 dark:border-primary-500/30 bg-primary-50 dark:bg-primary-900/10' : 'border-slate-200 dark:border-slate-700/50 bg-white dark:bg-transparent hover:bg-slate-50 dark:hover:bg-slate-800'
-                      }
-                    `}
-                  >
-                      {/* Checkbox */}
-                      <div>
-                        <input 
-                          type="checkbox" 
-                          checked={selectedIds.has(cue.id)}
-                          onChange={() => handleToggleSelection(cue.id)}
-                          className="w-5 h-5 border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-primary-600 focus:ring-primary-500 cursor-pointer"
-                        />
-                      </div>
-
-                      {/* Timecode */}
-                      <div className="text-xs text-slate-400 dark:text-slate-500 font-mono hidden md:block">
-                          {cue.startTime.split(',')[0]}
-                      </div>
-                      
-                      {/* Original Text */}
-                      <div className={`text-sm md:col-span-1 col-span-2 ${isChanged ? 'text-slate-400 dark:text-slate-500 line-through decoration-slate-400' : 'text-slate-600 dark:text-slate-300'}`}>
-                          {cue.originalText}
-                      </div>
-
-                      {/* Arrow (Desktop only) */}
-                      <div className="hidden md:flex justify-center text-slate-400 dark:text-slate-600">
-                         {isChanged && <ArrowRightIcon />}
-                      </div>
-
-                      {/* Corrected Text (Editable) */}
-                      <div className="text-sm col-span-2 md:col-span-1">
-                        {isEditing ? (
-                          <div className="flex gap-2">
-                             <input 
-                                autoFocus
-                                type="text"
-                                className="w-full bg-slate-50 dark:bg-slate-950 border border-primary-500 px-2 py-1 text-slate-900 dark:text-white outline-none"
-                                value={editText}
-                                onChange={(e) => setEditText(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') handleEditSave();
-                                  if (e.key === 'Escape') handleEditCancel();
-                                }}
-                             />
-                          </div>
-                        ) : (
-                          <div className={`break-words ${isChanged ? 'text-slate-900 dark:text-primary-100 font-medium' : 'text-slate-500 dark:text-slate-400'}`}>
-                            {cue.text === '' ? <span className="text-slate-400 dark:text-slate-600 italic">{t.deleted}</span> : cue.text}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Actions */}
-                      <div className="flex items-center gap-2 justify-end">
-                        {isEditing ? (
-                          <>
-                             <button onClick={handleEditSave} className="px-2 py-0.5 text-xs bg-green-100 hover:bg-green-200 dark:bg-green-900/30 dark:hover:bg-green-900/50 text-green-700 dark:text-green-400 font-medium" title={t.saveBtn}>
-                                {t.saveBtn}
-                             </button>
-                             <button onClick={handleEditCancel} className="px-2 py-0.5 text-xs bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-600 dark:text-slate-300 font-medium" title={t.cancelBtn}>
-                                {t.cancelBtn}
-                             </button>
-                          </>
-                        ) : (
-                          <>
-                             <button onClick={() => handleEditStart(cue)} className="px-2 py-0.5 text-xs bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-white font-medium border border-slate-200 dark:border-slate-700" title={t.editBtn}>
-                                {t.editBtn}
-                             </button>
-                             {isChanged && (
-                               <>
-                                 <button 
-                                  onClick={() => handleConfirm(cue.id)} 
-                                  className={`px-2 py-0.5 text-xs font-medium border ${
-                                    cue.isConfirmed 
-                                      ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 border-green-200 dark:border-green-900' 
-                                      : 'bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:text-green-600 dark:hover:text-green-400 hover:bg-green-50 dark:hover:bg-green-900/10 border-slate-200 dark:border-slate-700'
-                                  }`} 
-                                  title={t.btnConfirm}
-                                 >
-                                    {t.okBtn}
-                                 </button>
-                                 <button 
-                                  onClick={() => handleDiscard(cue.id)} 
-                                  className="px-2 py-0.5 text-xs bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/10 font-medium border border-slate-200 dark:border-slate-700" 
-                                  title={t.btnDiscard}
-                                 >
-                                    {t.xBtn}
-                                 </button>
-                               </>
-                             )}
-                          </>
-                        )}
-                      </div>
-                  </div>
-              );
-          })}
-          {visibleCues.length === 0 && (
-               <div className="text-center text-slate-500 py-20 flex flex-col items-center">
-                  <div className="bg-slate-100 dark:bg-slate-800 p-4 rounded-full mb-4">
-                    <CheckIcon />
-                  </div>
-                  <p>{t.noChanges}</p>
-                  <button onClick={() => setViewAllLines(true)} className="text-primary-600 dark:text-primary-400 hover:underline mt-2 text-sm">{t.viewAll}</button>
+        <div className="flex-1 overflow-y-auto p-0 scroll-smooth">
+           {displayedCues.length === 0 ? (
+               <div className="h-full flex flex-col items-center justify-center text-slate-400 p-8">
+                  <CheckIcon />
+                  <p className="mt-4">{t.noChanges}</p>
+                  <button onClick={() => setViewAllLines(true)} className="mt-2 text-primary-500 hover:underline">{t.viewAll}</button>
                </div>
-          )}
+           ) : (
+               <div className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {displayedCues.map(cue => {
+                      const isModified = cue.text !== cue.originalText;
+                      const isEditing = editingId === cue.id;
+                      const isSelected = selectedIds.has(cue.id);
+                      const isConfirmed = cue.isConfirmed;
+
+                      return (
+                          <div 
+                            key={cue.id} 
+                            className={`
+                              group p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors relative
+                              ${isSelected ? 'bg-primary-50/50 dark:bg-primary-900/10' : ''}
+                              ${isConfirmed ? 'opacity-50' : ''}
+                            `}
+                          >
+                              <div className="flex gap-4">
+                                  <div className="pt-1">
+                                     <input 
+                                       type="checkbox" 
+                                       className="rounded border-slate-300 dark:border-slate-600 text-primary-600 focus:ring-primary-500 bg-white dark:bg-slate-900 cursor-pointer"
+                                       checked={isSelected}
+                                       onChange={() => handleToggleSelection(cue.id)}
+                                     />
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-2 mb-1">
+                                          <span className="text-xs font-mono text-slate-400 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">#{cue.id}</span>
+                                          <span className="text-xs font-mono text-slate-400">{cue.startTime} → {cue.endTime}</span>
+                                          {isModified && (
+                                              <span className="text-[10px] font-bold uppercase tracking-wider text-amber-500 bg-amber-50 dark:bg-amber-900/20 px-1.5 py-0.5 rounded ml-2">Modified</span>
+                                          )}
+                                          {isConfirmed && (
+                                              <span className="text-[10px] font-bold uppercase tracking-wider text-green-500 bg-green-50 dark:bg-green-900/20 px-1.5 py-0.5 rounded">Confirmed</span>
+                                          )}
+                                      </div>
+
+                                      {isEditing ? (
+                                          <div className="mt-2">
+                                              <textarea 
+                                                className="w-full bg-white dark:bg-slate-900 border border-primary-300 dark:border-primary-700 focus:ring-2 focus:ring-primary-200 outline-none rounded p-2 text-slate-900 dark:text-white mb-2"
+                                                value={editText}
+                                                onChange={(e) => setEditText(e.target.value)}
+                                                autoFocus
+                                                rows={2}
+                                              />
+                                              <div className="flex gap-2">
+                                                  <button 
+                                                    onClick={handleEditSave}
+                                                    className="text-xs bg-primary-600 text-white px-3 py-1.5 rounded hover:bg-primary-700 font-medium"
+                                                  >
+                                                    {t.saveBtn}
+                                                  </button>
+                                                  <button 
+                                                    onClick={handleEditCancel}
+                                                    className="text-xs bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-3 py-1.5 rounded hover:bg-slate-300 dark:hover:bg-slate-600 font-medium"
+                                                  >
+                                                    {t.cancelBtn}
+                                                  </button>
+                                              </div>
+                                          </div>
+                                      ) : (
+                                          <div className="mt-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                              {/* Original */}
+                                              <div className={`text-slate-500 dark:text-slate-500 line-through decoration-slate-300 dark:decoration-slate-700 text-sm ${!isModified ? 'hidden md:block opacity-50' : ''}`}>
+                                                  {cue.originalText}
+                                              </div>
+                                              
+                                              {/* New */}
+                                              <div className="text-slate-900 dark:text-slate-100 font-medium text-base relative">
+                                                 {cue.text || <span className="text-slate-400 italic text-sm">{t.deleted}</span>}
+                                                 
+                                                 {/* Action Buttons (Hover) */}
+                                                 <div className="md:absolute md:right-0 md:top-0 md:translate-x-full md:pl-4 flex items-center gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity mt-2 md:mt-0">
+                                                     {!isConfirmed && (
+                                                       <>
+                                                          <button 
+                                                            onClick={() => handleConfirm(cue.id)}
+                                                            className="p-1.5 text-green-600 bg-green-50 dark:bg-green-900/20 hover:bg-green-100 dark:hover:bg-green-900/40 rounded shadow-sm"
+                                                            title={t.btnConfirm}
+                                                          >
+                                                             <CheckIcon />
+                                                          </button>
+                                                          {isModified && (
+                                                              <button 
+                                                                  onClick={() => handleDiscard(cue.id)}
+                                                                  className="p-1.5 text-red-500 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40 rounded shadow-sm"
+                                                                  title={t.btnDiscard}
+                                                              >
+                                                                  <XMarkIcon />
+                                                              </button>
+                                                          )}
+                                                          <button 
+                                                              onClick={() => handleEditStart(cue)}
+                                                              className="p-1.5 text-slate-500 bg-slate-50 dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 rounded shadow-sm border border-slate-200 dark:border-slate-700"
+                                                              title={t.editBtn}
+                                                          >
+                                                              <PencilIcon />
+                                                          </button>
+                                                       </>
+                                                     )}
+                                                     {isConfirmed && (
+                                                         <button 
+                                                           onClick={() => {
+                                                               setCues(prev => prev.map(c => c.id === cue.id ? { ...c, isConfirmed: false } : c));
+                                                           }}
+                                                           className="text-xs text-slate-400 underline"
+                                                         >
+                                                             Undo
+                                                         </button>
+                                                     )}
+                                                 </div>
+                                              </div>
+                                          </div>
+                                      )}
+                                  </div>
+                              </div>
+                          </div>
+                      );
+                  })}
+               </div>
+           )}
         </div>
       </div>
     );
-  }
+  };
+
+  const currentModelName = AVAILABLE_MODELS.find(m => m.id === selectedModel)?.name;
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-200 font-sans selection:bg-primary-500/30 flex flex-col bg-gradient-to-br from-primary-500/10 via-slate-100 to-indigo-200/20 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
@@ -957,37 +1044,38 @@ const App: React.FC = () => {
             <LogoIcon className="h-16 md:h-24 w-auto" />
           </div>
           
-          <div className="flex items-center gap-6">
+          <div className="flex items-center">
 
-            <div className="flex items-center gap-6">
-                 {/* Model Selector (Only visible in IDLE/PARSING state) */}
-                 {(status === AppStatus.IDLE || status === AppStatus.PARSING) && (
-                    <div className="relative" ref={modelMenuRef}>
-                        <button 
-                            onClick={() => setShowModelMenu(!showModelMenu)}
-                            className="flex items-center gap-2 text-slate-600 dark:text-slate-300 hover:text-primary-500 dark:hover:text-primary-400 transition-colors p-1"
-                            title="Select AI Model"
-                        >
-                            <RobotIcon className="w-6 h-6" />
-                        </button>
-                        
-                        {showModelMenu && (
-                            <div className="absolute right-0 top-full mt-2 w-48 bg-white dark:bg-slate-800 shadow-xl rounded-lg border border-slate-100 dark:border-slate-700 py-1 z-50 animate-in fade-in zoom-in-95 duration-100">
-                                {AVAILABLE_MODELS.map(model => (
-                                    <button 
-                                        key={model.id}
-                                        onClick={() => { setSelectedModel(model.id); setShowModelMenu(false); }}
-                                        className={`w-full text-left px-4 py-2 text-sm flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors ${selectedModel === model.id ? 'text-primary-600 dark:text-primary-400 font-medium' : 'text-slate-600 dark:text-slate-300'}`}
-                                    >
-                                        <div className={`w-2 h-2 rounded-full ${selectedModel === model.id ? 'bg-primary-500' : 'bg-transparent'}`}></div>
-                                        {model.name}
-                                    </button>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                 )}
+             {/* Model Selector (Only visible in IDLE/PARSING state) */}
+             {(status === AppStatus.IDLE || status === AppStatus.PARSING) && (
+                <div className="relative mr-6 border-r border-slate-200 dark:border-slate-700 pr-6" ref={modelMenuRef}>
+                    <button 
+                        onClick={() => setShowModelMenu(!showModelMenu)}
+                        className="flex items-center gap-2 text-slate-600 dark:text-slate-300 hover:text-primary-500 dark:hover:text-primary-400 transition-colors p-1 group"
+                        title="Select AI Model"
+                    >
+                        <RobotIcon className="w-5 h-5 group-hover:text-primary-500" />
+                        <span className="text-sm font-medium group-hover:text-primary-500 hidden sm:block">{currentModelName}</span>
+                    </button>
+                    
+                    {showModelMenu && (
+                        <div className="absolute right-0 top-full mt-2 w-48 bg-white dark:bg-slate-800 shadow-xl rounded-lg border border-slate-100 dark:border-slate-700 py-1 z-50 animate-in fade-in zoom-in-95 duration-100">
+                            {AVAILABLE_MODELS.map(model => (
+                                <button 
+                                    key={model.id}
+                                    onClick={() => { setSelectedModel(model.id); setShowModelMenu(false); }}
+                                    className={`w-full text-left px-4 py-2 text-sm flex items-center gap-3 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors ${selectedModel === model.id ? 'text-primary-600 dark:text-primary-400 font-medium' : 'text-slate-600 dark:text-slate-300'}`}
+                                >
+                                    <div className={`w-2 h-2 rounded-full ${selectedModel === model.id ? 'bg-primary-500' : 'bg-transparent'}`}></div>
+                                    {model.name}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                </div>
+             )}
 
+            <div className="flex items-center gap-4">
                  {/* Theme Switcher */}
                 <div className="relative" ref={themeMenuRef}>
                    <button 
@@ -1054,6 +1142,7 @@ const App: React.FC = () => {
         {/* View 1: Upload & Config */}
         {(status === AppStatus.IDLE || status === AppStatus.PARSING) && (
           <div className="max-w-4xl mx-auto">
+            {cues.length === 0 && (
             <div className="mb-12 text-center mt-8">
                <h2 className="text-4xl md:text-5xl font-extrabold text-slate-900 dark:text-white mb-4 tracking-tight leading-tight">
                   {t.slogan}
@@ -1062,22 +1151,23 @@ const App: React.FC = () => {
                   {t.subheading}
                </p>
             </div>
+            )}
 
             {cues.length === 0 ? (
                 renderUploadArea()
             ) : (
                 <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-                    <div className="flex items-center justify-between mb-6 bg-white dark:bg-slate-800/50 p-4 border border-slate-200 dark:border-slate-700">
-                        <div className="flex items-center gap-3">
-                            <div className="bg-green-100 dark:bg-green-500/20 text-green-600 dark:text-green-400 p-2">
+                    <div className="flex items-center justify-between mb-6 bg-white dark:bg-slate-800 p-6 border border-slate-200 dark:border-slate-700 shadow-sm rounded-lg">
+                        <div className="flex items-center gap-4">
+                            <div className="bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400 p-3 rounded-md">
                                 <CheckIcon />
                             </div>
                             <div>
-                                <p className="text-slate-900 dark:text-white font-medium">{fileName}</p>
-                                <p className="text-slate-500 dark:text-slate-400 text-xs">{cues.length} {t.parsed}</p>
+                                <h3 className="text-lg font-bold text-slate-900 dark:text-white leading-none mb-1">{fileName}</h3>
+                                <p className="text-slate-500 dark:text-slate-400 text-sm">{cues.length} {t.parsed}</p>
                             </div>
                         </div>
-                        <button onClick={() => setCues([])} className="text-xs text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 underline">{t.removeFile}</button>
+                        <button onClick={() => setCues([])} className="text-sm font-medium text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 underline underline-offset-4 decoration-red-200 hover:decoration-red-500 transition-all">{t.removeFile}</button>
                     </div>
 
                     {renderContextForm()}
@@ -1095,31 +1185,149 @@ const App: React.FC = () => {
 
         {/* View 2: Processing */}
         {status === AppStatus.PROCESSING && (
-          <div className="flex flex-col items-center justify-center py-20">
-             <div className="relative w-24 h-24 mb-8">
-                <div className="absolute inset-0 border-4 border-slate-200 dark:border-slate-800 rounded-full"></div>
-                <div 
-                    className="absolute inset-0 border-4 border-primary-500 border-t-transparent animate-spin rounded-full"
-                ></div>
-             </div>
-             <h2 className="text-2xl font-bold text-slate-900 dark:text-white mb-2">{t.processingTitle}</h2>
-             <p className="text-slate-600 dark:text-slate-400 mb-6">{t.processingDesc}</p>
-             
-             <div className="w-full max-w-md bg-slate-200 dark:bg-slate-800 h-2 overflow-hidden rounded-full">
-                <div 
-                    className="bg-primary-500 h-full transition-all duration-300 ease-out rounded-full"
-                    style={{ width: `${progress}%` }}
-                ></div>
-             </div>
-             <p className="mt-2 text-slate-500 font-mono text-sm">{progress}%</p>
-
-             {/* Stop / Cancel Button */}
+          <div className="relative flex flex-col items-center pt-10 pb-0 max-w-5xl mx-auto w-full h-[calc(100vh-140px)]">
+             {/* Stop / Cancel Button moved to top left */}
              <button 
                 onClick={handleCancelProcessing}
-                className="mt-8 px-6 py-2 border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-red-600 dark:hover:text-red-400 transition-colors text-sm font-medium uppercase tracking-wide"
+                className="absolute top-0 left-0 flex items-center gap-2 text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white transition-colors text-sm font-medium uppercase tracking-wide group"
              >
+                <ArrowLeftIcon className="w-4 h-4 transition-transform group-hover:-translate-x-1" />
                 {t.cancelProcessing}
              </button>
+
+             <div className="flex flex-col items-center w-full max-w-2xl shrink-0">
+                 <div className="flex items-center gap-4 mb-4">
+                     <div className="relative w-8 h-8">
+                        <div className="absolute inset-0 border-[3px] border-slate-200 dark:border-slate-800 rounded-full"></div>
+                        <div 
+                            className="absolute inset-0 border-[3px] border-primary-500 border-t-transparent animate-spin rounded-full"
+                        ></div>
+                     </div>
+                     <h2 className="text-2xl font-bold text-slate-900 dark:text-white">{t.processingTitle}</h2>
+                 </div>
+                 
+                 <p className="text-slate-600 dark:text-slate-400 mb-6 text-center">{t.processingDesc}</p>
+                 
+                 <div className="w-full bg-slate-200 dark:bg-slate-800 h-2 overflow-hidden rounded-full mb-2">
+                    <div 
+                        className="bg-primary-500 h-full transition-all duration-300 ease-out rounded-full"
+                        style={{ width: `${progress}%` }}
+                    ></div>
+                 </div>
+                 <p className="text-slate-500 font-mono text-xs mb-8">{progress}%</p>
+             </div>
+
+             {/* Realtime List */}
+             <div className="w-full flex-1 min-h-0 flex flex-col animate-in fade-in slide-in-from-bottom-8 duration-700">
+                <div className="flex items-center justify-center mb-4">
+                    <h3 className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest bg-slate-100 dark:bg-slate-900 px-4 py-1 rounded-full">
+                        {t.realtimeTitle}
+                    </h3>
+                </div>
+                
+                <div 
+                    ref={realtimeListRef}
+                    className="flex-1 overflow-y-auto rounded-2xl border-2 border-dashed border-primary-200/50 dark:border-primary-900/30 bg-gradient-to-b from-white/50 to-white/20 dark:from-slate-900/50 dark:to-slate-900/20 p-6 custom-scrollbar scroll-smooth backdrop-blur-sm"
+                >
+                    {realtimeCues.length === 0 ? (
+                        <div className="h-full flex items-center justify-center text-slate-400 dark:text-slate-600 text-sm italic">
+                            Waiting for results...
+                        </div>
+                    ) : (
+                        <div className="space-y-3 max-w-3xl mx-auto">
+                            {realtimeCues.map((cue, idx) => {
+                                const isModified = cue.text !== cue.originalText;
+                                const isEditing = editingRealtimeId === cue.id;
+                                
+                                return (
+                                    <div 
+                                        key={cue.id} 
+                                        className={`
+                                            rounded-xl p-3 transition-all duration-500 ease-out group relative
+                                            ${isModified 
+                                                ? 'bg-[#FFFBEB] dark:bg-amber-950/20 border border-amber-100 dark:border-amber-900/30 shadow-sm' 
+                                                : 'bg-white/60 dark:bg-slate-800/40 border border-slate-100 dark:border-slate-800'
+                                            }
+                                        `}
+                                    >
+                                        <div className="flex justify-between items-start mb-2">
+                                            <span className={`font-mono text-xs ${isModified ? 'text-amber-700/50 dark:text-amber-500/50' : 'text-slate-400'}`}>#{cue.id}</span>
+                                            
+                                            <div className="flex items-center gap-2">
+                                                {isModified && (
+                                                    <span className="text-[10px] font-extrabold text-[#B45309] dark:text-amber-400 bg-[#FEF3C7] dark:bg-amber-900/40 px-2 py-0.5 rounded uppercase tracking-wider">
+                                                        Fixed
+                                                    </span>
+                                                )}
+                                                
+                                                {/* Action Buttons */}
+                                                {!isEditing && (
+                                                    <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                        {isModified && (
+                                                            <button 
+                                                                onClick={() => handleRealtimeDiscard(idx)}
+                                                                className="p-1 hover:bg-slate-200 dark:hover:bg-slate-700 rounded text-slate-500 hover:text-red-500 transition-colors"
+                                                                title={t.revertBtn}
+                                                            >
+                                                                <RefreshIcon />
+                                                            </button>
+                                                        )}
+                                                        <button 
+                                                            onClick={() => handleRealtimeEditStart(cue)}
+                                                            className="p-1 hover:bg-slate-200 dark:hover:bg-slate-700 rounded text-slate-500 hover:text-primary-500 transition-colors"
+                                                            title={t.editBtn}
+                                                        >
+                                                            <PencilIcon />
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                        
+                                        {isEditing ? (
+                                            <div className="mt-2">
+                                                <textarea 
+                                                    className="w-full bg-white dark:bg-slate-900 border border-primary-300 dark:border-primary-700 focus:ring-2 focus:ring-primary-200 outline-none rounded p-2 text-slate-900 dark:text-white mb-2 text-sm"
+                                                    value={realtimeEditText}
+                                                    onChange={(e) => setRealtimeEditText(e.target.value)}
+                                                    autoFocus
+                                                    rows={2}
+                                                />
+                                                <div className="flex gap-2">
+                                                    <button 
+                                                        onClick={() => handleRealtimeEditSave(idx)}
+                                                        className="text-xs bg-primary-600 text-white px-3 py-1.5 rounded hover:bg-primary-700 font-medium"
+                                                    >
+                                                        {t.saveBtn}
+                                                    </button>
+                                                    <button 
+                                                        onClick={() => setEditingRealtimeId(null)}
+                                                        className="text-xs bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-3 py-1.5 rounded hover:bg-slate-300 dark:hover:bg-slate-600 font-medium"
+                                                    >
+                                                        {t.cancelBtn}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="space-y-1">
+                                                {isModified && (
+                                                    <div className="text-slate-400 dark:text-slate-500 line-through text-xs">
+                                                        {cue.originalText}
+                                                    </div>
+                                                )}
+                                                <div className={`text-base leading-snug ${isModified ? 'font-semibold text-slate-900 dark:text-slate-100' : 'text-slate-600 dark:text-slate-400'}`}>
+                                                    {cue.text}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                            <div className="h-4"></div> {/* Bottom spacer */}
+                        </div>
+                    )}
+                </div>
+             </div>
           </div>
         )}
 
