@@ -8,10 +8,8 @@ export interface SubtitleCue {
 }
 
 export interface ContextInfo {
-  speakerName: string;
-  topic: string;
-  keywords: string; // Specific terms like "Algonquin College"
-  extraContext: string;
+  projectContext: string; // Mapping to "Content Description"
+  glossaryTerms: string; // Mapping to "Key Names & Terms"
   // Reference Website
   referenceUrl: string;
   referenceUrlContent: string;

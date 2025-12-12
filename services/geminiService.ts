@@ -39,11 +39,10 @@ export const fixSubtitlesWithGemini = async (
     // Truncate to reasonable length to avoid massive prompts if the site is huge, approx 10k chars
     const truncatedContent = context.referenceUrlContent.slice(0, 10000);
     referenceContext = `
-      REFERENCE MATERIAL FROM URL (${context.referenceUrl}):
+      Reference Material (${context.referenceUrl}):
       """
       ${truncatedContent}
       """
-      (Use the vocabulary, names, and context from the text above to correct specific terms in the subtitles.)
     `;
   }
 
@@ -58,24 +57,22 @@ export const fixSubtitlesWithGemini = async (
     
     // Construct Prompt
     const prompt = `
-      You are an expert professional subtitle editor and proofreader. 
-      Your task is to correct typos, misheard words, and proper noun errors in the provided subtitle lines.
+      You are a professional subtitle editor. Your task is to correct typos, homophone errors, and punctuation in the provided subtitles.
       
-      CONTEXT INFORMATION:
-      - Speaker: ${context.speakerName || 'Unknown'}
-      - Topic: ${context.topic || 'General Interview'}
-      - Key Terms/Glossary (Pay close attention to these): ${context.keywords || 'None'}
-      - Additional Background: ${context.extraContext || 'None'}
+      Context Information
+      Context & User Instructions: ${context.projectContext || "General video content"} (Follow any specific editing rules provided here)
+      
+      Critical Glossary: ${context.glossaryTerms || "None provided"} 
+      (Use the glossary to ensure proper nouns and technical terms are spelled correctly. Use the scenario to infer context for ambiguous words.)
       ${referenceContext}
 
-      INSTRUCTIONS:
-      1. Analyze the input lines based on the context above.
-      2. Fix homophone errors (e.g., "right" vs "write") and proper nouns (e.g., "Algonquin" vs "亚岗昆").
-      3. Improve punctuation and fix sentence fragmentation (断句错误) for better readability.
+      Instructions
+      1. Fix typos based on pinyin/sound-alike errors (common in ASR).
+      2. If a word in the subtitles sounds similar to a word in the Critical Glossary, prioritize the spelling in the Glossary.
+      3. Ensure sentence flow is logical based on the provided context.
+      4. Do NOT summarize or change the meaning. Keep the original line count and timestamps.
 ${cleaningInstructions}
-      4. Maintain the original tone and casual speech patterns unless they conflict with the cleaning instructions above.
-      5. Do NOT merge lines. Do NOT split lines. The output array length MUST match the input array length exactly. If a line becomes empty after cleaning, return an empty string.
-      6. Return ONLY a JSON array of strings containing the corrected text for each line.
+      5. Return ONLY a JSON array of strings containing the corrected text for each line.
     `;
 
     try {
